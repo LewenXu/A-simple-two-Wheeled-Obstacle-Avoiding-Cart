@@ -1,0 +1,673 @@
+#include <Servo.h>
+
+// =====================================================
+// Pin numbers
+// =====================================================
+
+#define IR_LED_LEFT 10
+#define IR_RECEIVER_LEFT 11
+
+#define IR_LED_MID 6
+#define IR_RECEIVER_MID 7
+
+#define IR_LED_RIGHT 2
+#define IR_RECEIVER_RIGHT 3
+
+#define LED_LEFT A2
+#define LED_MID A1
+#define LED_RIGHT A0
+
+#define SERVO_1 12
+#define SERVO_2 13
+
+Servo servo_1;
+Servo servo_2;
+
+
+// =====================================================
+// Basic tuned values
+// =====================================================
+
+const int STOP_VALUE = 1500;
+
+// If the robot drifts to the left while moving forward,
+// change -20 to -10, 0, or 10.
+// If the robot drifts to the right while moving forward,
+// make -20 smaller, for example -30.
+const int CALIBRATION_VALUE_LEFT = -10;
+
+const int FORWARD_SPEED = 60;
+
+const int CORRECTION_SMALL = -6;
+const int CORRECTION_BIG = -30;
+
+int LEFT_TURN_TIME  = 497;
+int RIGHT_TURN_TIME = 517;
+
+const int WALL_THRESHOLD = 6;
+const int FRONT_WALL_THRESHOLD = WALL_THRESHOLD - 2;
+
+
+// =====================================================
+// Main tuning parameters
+// =====================================================
+
+// Prevent turning for a short time after startup.
+// This avoids false junction detection immediately after the robot starts.
+const unsigned long START_TURN_LOCKOUT_MS = 700;
+
+// The side opening must be detected this many times in a row
+// before the robot confirms that it should turn.
+const int SIDE_OPEN_CONFIRM_COUNT = 2;
+
+// When the front is open but a side opening appears,
+// move forward for this long before turning.
+// Increase this value if the robot turns too early and hits the wall.
+// Decrease this value if the robot turns too late and misses the junction.
+const int SIDE_OPEN_ALIGN_MS = 900;
+
+// When the front is blocked, only move forward a short distance to align.
+// Increase this value if the robot turns too early.
+// Decrease this value if the robot gets too close to the front wall.
+const int CORNER_ALIGN_MS = 241;
+
+// Forward speed used while aligning with a junction.
+const int ALIGN_FORWARD_SPEED = 60;
+
+// After turning, move forward for this long to enter the new corridor.
+const int POST_TURN_DELAY_MS = 1051;
+
+// At a T-junction, creep forward for this long before checking again.
+const int T_JUNCTION_CREEP_MS = 150;
+
+// Before making a U-turn at a short dead end, reverse for this long.
+const int BACKUP_BEFORE_UTURN_MS = 260;
+
+// Speed and time used for a 180-degree U-turn.
+const int U_TURN_SPEED = 250;
+const int U_TURN_TIME = 980;
+
+// Time threshold used to identify a long dead end.
+const unsigned long LONG_DEAD_END_THRESHOLD_MS = 1400;
+
+
+// =====================================================
+// Global state
+// =====================================================
+
+unsigned long startTime = 0;
+
+unsigned long corridorEntryTime = 0;
+bool trackingDeadEndCorridor = false;
+
+char lastTurnDirection = ' ';
+bool didUTurn = false;
+
+bool suppressEdgeDetection = false;
+bool postUTurnOpenAreaSeen = false;
+
+int leftOpeningCount = 0;
+int rightOpeningCount = 0;
+
+
+// =====================================================
+// Sensor state
+// =====================================================
+
+struct SensorState {
+  int left;
+  int mid;
+  int right;
+
+  bool leftWall;
+  bool frontWall;
+  bool rightWall;
+};
+
+
+// =====================================================
+// Setup
+// =====================================================
+
+void setup() {
+  pinMode(IR_LED_LEFT, OUTPUT);
+  pinMode(IR_LED_MID, OUTPUT);
+  pinMode(IR_LED_RIGHT, OUTPUT);
+
+  pinMode(IR_RECEIVER_LEFT, INPUT);
+  pinMode(IR_RECEIVER_MID, INPUT);
+  pinMode(IR_RECEIVER_RIGHT, INPUT);
+
+  pinMode(LED_LEFT, OUTPUT);
+  pinMode(LED_MID, OUTPUT);
+  pinMode(LED_RIGHT, OUTPUT);
+
+  Serial.begin(9600);
+
+  servo_1.attach(SERVO_1);
+  servo_2.attach(SERVO_2);
+
+  stop();
+
+  startTime = millis();
+}
+
+
+// =====================================================
+// Movement functions
+// =====================================================
+
+void setServos(int leftServoSpeed, int rightServoSpeed) {
+  int pwm1 = STOP_VALUE - leftServoSpeed - CALIBRATION_VALUE_LEFT;
+  int pwm2 = STOP_VALUE + rightServoSpeed;
+
+  servo_1.writeMicroseconds(pwm1);
+  servo_2.writeMicroseconds(pwm2);
+
+  Serial.print("servo_1: ");
+  Serial.print(pwm1);
+  Serial.print(" | servo_2: ");
+  Serial.println(pwm2);
+}
+
+void moveForward(int speed) {
+  setServos(speed, speed);
+}
+
+void moveBackward(int speed) {
+  setServos(-speed, -speed);
+}
+
+void stop() {
+  servo_1.writeMicroseconds(STOP_VALUE);
+  servo_2.writeMicroseconds(STOP_VALUE + 3);
+  Serial.println("STOP");
+}
+
+void turnRightInPlace(int speed) {
+  int pwm1 = STOP_VALUE + speed - CALIBRATION_VALUE_LEFT;
+  int pwm2 = STOP_VALUE + speed;
+
+  servo_1.writeMicroseconds(pwm1);
+  servo_2.writeMicroseconds(pwm2);
+
+  Serial.println("TURN RIGHT IN PLACE");
+}
+
+void turnLeftInPlace(int speed) {
+  int pwm1 = STOP_VALUE - speed - CALIBRATION_VALUE_LEFT;
+  int pwm2 = STOP_VALUE - speed;
+
+  servo_1.writeMicroseconds(pwm1);
+  servo_2.writeMicroseconds(pwm2);
+
+  Serial.println("TURN LEFT IN PLACE");
+}
+
+void resetTurnDetection() {
+  leftOpeningCount = 0;
+  rightOpeningCount = 0;
+  trackingDeadEndCorridor = false;
+}
+
+void turnRight90() {
+  turnRightInPlace(200);
+  delay(RIGHT_TURN_TIME);
+
+  stop();
+  delay(80);
+
+  resetTurnDetection();
+}
+
+void turnLeft90() {
+  turnLeftInPlace(200);
+  delay(LEFT_TURN_TIME);
+
+  stop();
+  delay(80);
+
+  resetTurnDetection();
+}
+
+void uTurn() {
+  Serial.println("U-TURN");
+
+  turnLeftInPlace(U_TURN_SPEED);
+  delay(U_TURN_TIME);
+
+  stop();
+  delay(100);
+
+  resetTurnDetection();
+}
+
+void afterTurnMoveForward() {
+  moveForward(100);
+  delay(POST_TURN_DELAY_MS);
+
+  stop();
+  delay(60);
+}
+
+
+// =====================================================
+// Sensor functions
+// =====================================================
+
+int irDetect(int irLedPin, int irReceiverPin, long frequency) {
+  tone(irLedPin, frequency);
+  delay(1);
+
+  int ir = digitalRead(irReceiverPin);
+
+  noTone(irLedPin);
+  delay(1);
+
+  return ir;
+}
+
+int irDistance(int irLedPin, int irReceiverPin, int irRedPin) {
+  int distance = 0;
+
+  for (long f = 37000; f <= 42000; f += 1000) {
+    distance += irDetect(irLedPin, irReceiverPin, f);
+  }
+
+  if (distance < WALL_THRESHOLD) {
+    digitalWrite(irRedPin, HIGH);
+  } else {
+    digitalWrite(irRedPin, LOW);
+  }
+
+  return distance;
+}
+
+SensorState readSensors() {
+  SensorState s;
+
+  s.left  = irDistance(IR_LED_LEFT,  IR_RECEIVER_LEFT,  LED_LEFT);
+  s.mid   = irDistance(IR_LED_MID,   IR_RECEIVER_MID,   LED_MID);
+  s.right = irDistance(IR_LED_RIGHT, IR_RECEIVER_RIGHT, LED_RIGHT);
+
+  s.leftWall  = s.left  < WALL_THRESHOLD;
+  s.frontWall = s.mid   < FRONT_WALL_THRESHOLD;
+  s.rightWall = s.right < WALL_THRESHOLD;
+
+  Serial.print("L: ");
+  Serial.print(s.left);
+  Serial.print(" | M: ");
+  Serial.print(s.mid);
+  Serial.print(" | R: ");
+  Serial.println(s.right);
+
+  return s;
+}
+
+
+// =====================================================
+// Corridor following
+// =====================================================
+
+void followCorridor(int left, int right) {
+  int difference = left - right;
+
+  Serial.print("Left distance: ");
+  Serial.print(left);
+  Serial.print(" | Right distance: ");
+  Serial.print(right);
+  Serial.print(" | Difference: ");
+  Serial.println(difference);
+
+  if (difference <= -3) {
+    Serial.println("Too close to LEFT wall -> steer right");
+    setServos(FORWARD_SPEED + CORRECTION_BIG,
+              FORWARD_SPEED - CORRECTION_BIG);
+  }
+
+  else if (difference == -2) {
+    Serial.println("Slightly close to LEFT wall -> small steer right");
+    setServos(FORWARD_SPEED + CORRECTION_SMALL,
+              FORWARD_SPEED - CORRECTION_SMALL);
+  }
+
+  else if (difference >= 3) {
+    Serial.println("Too close to RIGHT wall -> steer left");
+    setServos(FORWARD_SPEED - CORRECTION_BIG,
+              FORWARD_SPEED + CORRECTION_BIG);
+  }
+
+  else if (difference == 2) {
+    Serial.println("Slightly close to RIGHT wall -> small steer left");
+    setServos(FORWARD_SPEED - CORRECTION_SMALL,
+              FORWARD_SPEED + CORRECTION_SMALL);
+  }
+
+  else {
+    Serial.println("Centered -> move forward");
+    moveForward(FORWARD_SPEED);
+  }
+}
+
+
+// =====================================================
+// Dead-end tracking
+// =====================================================
+
+void updateDeadEndTracking(SensorState s) {
+  if (s.leftWall && s.rightWall && !s.frontWall) {
+    if (!trackingDeadEndCorridor) {
+      corridorEntryTime = millis();
+      trackingDeadEndCorridor = true;
+      Serial.println("Entered possible dead-end corridor -> timer started");
+    }
+  }
+
+  else if (!s.frontWall) {
+    trackingDeadEndCorridor = false;
+  }
+}
+
+
+// =====================================================
+// Turn helper functions
+// =====================================================
+
+void alignThenTurnLeft(bool frontBlocked) {
+  Serial.println("Align then turn LEFT");
+
+  moveForward(ALIGN_FORWARD_SPEED);
+
+  if (frontBlocked) {
+    delay(CORNER_ALIGN_MS);
+  } else {
+    delay(SIDE_OPEN_ALIGN_MS);
+  }
+
+  stop();
+  delay(80);
+
+  lastTurnDirection = 'L';
+  turnLeft90();
+  afterTurnMoveForward();
+}
+
+void alignThenTurnRight(bool frontBlocked) {
+  Serial.println("Align then turn RIGHT");
+
+  moveForward(ALIGN_FORWARD_SPEED);
+
+  if (frontBlocked) {
+    delay(CORNER_ALIGN_MS);
+  } else {
+    delay(SIDE_OPEN_ALIGN_MS);
+  }
+
+  stop();
+  delay(80);
+
+  lastTurnDirection = 'R';
+  turnRight90();
+  afterTurnMoveForward();
+}
+
+
+// =====================================================
+// Dead-end handling
+// =====================================================
+
+void handleDeadEnd() {
+  stop();
+  delay(80);
+
+  unsigned long timeInCorridor = millis() - corridorEntryTime;
+
+  Serial.print("Dead end! Time in corridor: ");
+  Serial.print(timeInCorridor);
+  Serial.println(" ms");
+
+  if (trackingDeadEndCorridor &&
+      timeInCorridor >= LONG_DEAD_END_THRESHOLD_MS) {
+
+    Serial.println("LONG dead end -> STOP (finish area)");
+    stop();
+
+    while (true) {}
+  }
+
+  Serial.println("SHORT dead end -> reverse then U-turn");
+
+  trackingDeadEndCorridor = false;
+  didUTurn = true;
+
+  suppressEdgeDetection = true;
+  postUTurnOpenAreaSeen = false;
+
+  stop();
+  delay(80);
+
+  uTurn();
+
+  moveForward(100);
+  delay(220);
+}
+
+
+// =====================================================
+// Post-U-turn suppress
+// =====================================================
+
+bool handlePostUTurnSuppress(SensorState s) {
+  if (!suppressEdgeDetection) {
+    return false;
+  }
+
+  if (!s.leftWall || !s.rightWall) {
+    postUTurnOpenAreaSeen = true;
+    Serial.println("Post-U-turn: open junction area detected");
+  }
+
+  if (postUTurnOpenAreaSeen && s.leftWall && s.rightWall) {
+    suppressEdgeDetection = false;
+    postUTurnOpenAreaSeen = false;
+    Serial.println("Edge detection re-enabled -> back in walled corridor");
+
+    return false;
+  }
+
+  if (!s.frontWall) {
+    moveForward(FORWARD_SPEED);
+    return true;
+  }
+
+  return false;
+}
+
+
+// =====================================================
+// T-junction handling
+// =====================================================
+
+void handleTJunction() {
+  Serial.println("Possible T-junction -> creeping forward to confirm");
+
+  moveForward(80);
+  delay(T_JUNCTION_CREEP_MS);
+
+  stop();
+  delay(80);
+
+  SensorState s2 = readSensors();
+
+  if (s2.frontWall && s2.rightWall && !s2.leftWall) {
+    Serial.println("Confirmed: left turn corner");
+    lastTurnDirection = 'L';
+
+    turnLeft90();
+    afterTurnMoveForward();
+  }
+
+  else if (s2.frontWall && s2.leftWall && !s2.rightWall) {
+    Serial.println("Confirmed: right turn corner");
+    lastTurnDirection = 'R';
+
+    turnRight90();
+    afterTurnMoveForward();
+  }
+
+  else if (s2.frontWall && !s2.leftWall && !s2.rightWall) {
+    Serial.println("Confirmed: true T-junction");
+
+    if (didUTurn && lastTurnDirection == 'L') {
+      Serial.println("Post U-turn: last was LEFT -> turn LEFT again");
+
+      turnLeft90();
+      lastTurnDirection = 'L';
+      didUTurn = false;
+    }
+
+    else if (didUTurn && lastTurnDirection == 'R') {
+      Serial.println("Post U-turn: last was RIGHT -> turn RIGHT again");
+
+      turnRight90();
+      lastTurnDirection = 'R';
+      didUTurn = false;
+    }
+
+    else {
+      Serial.println("No U-turn context -> default turn LEFT");
+
+      turnLeft90();
+      lastTurnDirection = 'L';
+    }
+
+    afterTurnMoveForward();
+  }
+
+  else if (s2.frontWall && s2.leftWall && s2.rightWall) {
+    Serial.println("Confirmed: dead end after creep -> next loop handles it");
+  }
+} 
+
+
+
+// =====================================================
+// Main loop
+// =====================================================
+
+void loop() {
+  SensorState s = readSensors();
+
+  updateDeadEndTracking(s);
+
+  bool leftOpen = !s.leftWall;
+  bool rightOpen = !s.rightWall;
+  bool frontOpen = !s.frontWall;
+
+
+  // =====================================================
+  // Case 1: Dead end
+  // =====================================================
+
+  if (s.frontWall && s.leftWall && s.rightWall) {
+    handleDeadEnd();
+    return;
+  }
+
+
+  // =====================================================
+  // Case 2: Post-U-turn suppress
+  // =====================================================
+
+  if (handlePostUTurnSuppress(s)) {
+    return;
+  }
+
+
+  // =====================================================
+  // Case 3: Start lockout
+  // =====================================================
+  // Side openings are not allowed to trigger turning immediately after startup.
+
+  if (millis() - startTime < START_TURN_LOCKOUT_MS && frontOpen) {
+    Serial.println("Start lockout -> forward only");
+    followCorridor(s.left, s.right);
+    return;
+  }
+
+
+  // =====================================================
+  // Case 4: Left opening
+  // =====================================================
+  // Right wall detected and left side open -> turn left.
+  // If the front is blocked, use a short alignment time.
+  // If the front is open, use a longer alignment time.
+
+  if (s.rightWall && leftOpen && !suppressEdgeDetection) {
+    leftOpeningCount++;
+    rightOpeningCount = 0;
+
+    Serial.print("Left opening count: ");
+    Serial.println(leftOpeningCount);
+
+    if (leftOpeningCount >= SIDE_OPEN_CONFIRM_COUNT) {
+      alignThenTurnLeft(s.frontWall);
+      leftOpeningCount = 0;
+      return;
+    }
+
+  } else {
+    leftOpeningCount = 0;
+  }
+
+
+  // =====================================================
+  // Case 5: Right opening
+  // =====================================================
+  // Left wall detected and right side open -> turn right.
+
+  if (s.leftWall && rightOpen && !suppressEdgeDetection) {
+    rightOpeningCount++;
+    leftOpeningCount = 0;
+
+    Serial.print("Right opening count: ");
+    Serial.println(rightOpeningCount);
+
+    if (rightOpeningCount >= SIDE_OPEN_CONFIRM_COUNT) {
+      alignThenTurnRight(s.frontWall);
+      rightOpeningCount = 0;
+      return;
+    }
+
+  } else {
+    rightOpeningCount = 0;
+  }
+
+
+  // =====================================================
+  // Case 6: Normal corridor
+  // =====================================================
+
+  if (frontOpen) {
+    followCorridor(s.left, s.right);
+    return;
+  }
+
+
+  // =====================================================
+  // Case 7: T-junction
+  // =====================================================
+
+  if (s.frontWall && leftOpen && rightOpen) {
+    handleTJunction();
+    return;
+  }
+
+
+  // =====================================================
+  // Safety fallback
+  // =====================================================
+
+  Serial.println("No condition matched -> stop for safety");
+  stop();
+}

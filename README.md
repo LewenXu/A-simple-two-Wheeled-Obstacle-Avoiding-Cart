@@ -1,464 +1,960 @@
-# USYD ELEC1601 Maze Robot README
 
-## 1. Project Overview
+# IR Maze Navigation Robot
 
-This project is an Arduino-based maze-navigation robot program.
-The robot uses three infrared sensor pairs to detect walls on the left, front, and right sides, and uses two continuous-rotation servos to move through a maze.
+## Overview
 
-The program supports:
+This project implements an autonomous maze-navigation controller for a two-wheel servo-driven robot using three infrared (IR) sensors.
 
-* forward movement through corridors;
-* left and right wall detection;
-* corridor centering by comparing left and right IR sensor readings;
-* left and right turn decisions at openings;
-* 90-degree timed turns;
-* T-junction confirmation by creeping forward and checking again;
-* dead-end detection;
-* U-turn behaviour at short dead ends;
-* permanent stop at long dead ends, treated as the finish area;
-* startup turn lockout to avoid false turns immediately after the robot starts;
-* post-U-turn suppression to avoid turning back into the same dead end.
+The robot continuously senses the environment on its **left**, **front**, and **right** sides, then determines whether to:
 
----
+- drive forward;
+- correct its position inside a corridor;
+- turn left;
+- turn right;
+- identify a T-junction;
+- detect and escape from a short dead end;
+- stop when a long dead end is interpreted as the finish area.
 
-## 2. Hardware Used
+The navigation logic combines:
 
-The program assumes the following hardware components:
-
-* Arduino-compatible board;
-* two continuous-rotation servos;
-* three IR LED and IR receiver pairs:
-
-  * left sensor;
-  * middle/front sensor;
-  * right sensor;
-* three indicator LEDs:
-
-  * left LED;
-  * middle LED;
-  * right LED.
+- IR wall detection;
+- corridor centering;
+- confirmed side-opening detection;
+- junction handling;
+- timed 90° turns;
+- U-turn recovery;
+- simple navigation memory.
 
 ---
 
-## 3. Pin Configuration
+## Hardware Configuration
 
-| Component          | Pin |
-| ------------------ | --: |
-| Left IR LED        |  10 |
-| Left IR Receiver   |  11 |
-| Middle IR LED      |   6 |
-| Middle IR Receiver |   7 |
-| Right IR LED       |   2 |
-| Right IR Receiver  |   3 |
-| Left LED           |  A2 |
-| Middle LED         |  A1 |
-| Right LED          |  A0 |
-| Servo 1            |  12 |
-| Servo 2            |  13 |
+The program uses three IR emitter/receiver pairs, three debugging LEDs, and two continuous-rotation servos.
 
-The pin definitions are placed at the top of the code so that wiring changes can be made easily.
+### IR Sensors
+
+| Direction | IR LED Pin | IR Receiver Pin |
+|---|---:|---:|
+| Left | 10 | 11 |
+| Front | 6 | 7 |
+| Right | 2 | 3 |
+
+### Debug LEDs
+
+| Direction | Pin |
+|---|---:|
+| Left | A2 |
+| Front | A1 |
+| Right | A0 |
+
+The LEDs indicate whether the corresponding IR sensor currently detects a wall.
+
+### Servo Motors
+
+| Motor | Pin |
+|---|---:|
+| Left Servo | 12 |
+| Right Servo | 13 |
 
 ---
 
-## 4. Main Constants and Tuning Values
+## Main Constants
 
-### Servo and Movement Values
-
-| Constant                 |  Value | Purpose                                                                |
-| ------------------------ | -----: | ---------------------------------------------------------------------- |
-| `STOP_VALUE`             |   1500 | Neutral pulse width for stopping the servos                            |
-| `CALIBRATION_VALUE_LEFT` |    -10 | Calibration offset for the left servo                                  |
-| `FORWARD_SPEED`          |     60 | Normal forward speed                                                   |
-| `CORRECTION_SMALL`       |     -6 | Small correction used when the robot is slightly off-centre            |
-| `CORRECTION_BIG`         |    -30 | Larger correction used when the robot is clearly too close to one wall |
-| `LEFT_TURN_TIME`         | 497 ms | Timed duration for a left 90-degree turn                               |
-| `RIGHT_TURN_TIME`        | 517 ms | Timed duration for a right 90-degree turn                              |
-| `U_TURN_SPEED`           |    250 | Speed used for a U-turn                                                |
-| `U_TURN_TIME`            | 980 ms | Timed duration for a 180-degree U-turn                                 |
-
-### Sensor Thresholds
-
-| Constant               |                Value | Purpose                                                     |
-| ---------------------- | -------------------: | ----------------------------------------------------------- |
-| `WALL_THRESHOLD`       |                    6 | General wall-detection threshold for left and right sensors |
-| `FRONT_WALL_THRESHOLD` | `WALL_THRESHOLD - 2` | Stricter threshold for the front sensor                     |
-
-The sensor logic treats a lower IR distance score as a stronger wall detection. Therefore:
+### Servo and Driving Parameters
 
 ```cpp
-s.leftWall  = s.left  < WALL_THRESHOLD;
-s.frontWall = s.mid   < FRONT_WALL_THRESHOLD;
-s.rightWall = s.right < WALL_THRESHOLD;
+const int SERVO_STOP_US = 1500;
+const int LEFT_SERVO_TRIM = -10;
+
+const int DRIVE_SPEED = 60;
+
+const int SOFT_CORRECTION = -6;
+const int STRONG_CORRECTION = -30;
 ```
 
----
+`SERVO_STOP_US` defines the neutral pulse used to stop the servos.
 
-## 5. Program Structure
+`LEFT_SERVO_TRIM` compensates for a small difference between the two motors.
 
-The program is divided into the following main sections:
+`DRIVE_SPEED` is the normal forward speed used while navigating corridors.
 
-1. pin definitions;
-2. tuning constants;
-3. global navigation state;
-4. sensor state structure;
-5. setup function;
-6. movement functions;
-7. sensor reading functions;
-8. corridor-following logic;
-9. dead-end tracking;
-10. turn helper functions;
-11. dead-end handling;
-12. post-U-turn suppression;
-13. T-junction handling;
-14. main loop.
-
-This structure separates low-level hardware control from high-level navigation decisions.
+The correction values are used to steer the robot back toward the center of a corridor.
 
 ---
 
-## 6. Sensor Reading Logic
-
-The robot estimates distance by testing several IR frequencies from 37 kHz to 42 kHz.
+## Turn Calibration
 
 ```cpp
-for (long f = 37000; f <= 42000; f += 1000) {
-  distance += irDetect(irLedPin, irReceiverPin, f);
-}
+const int TURN_LEFT_90_MS = 497;
+const int TURN_RIGHT_90_MS = 517;
 ```
 
-The total distance score is then used to decide whether a wall is present.
+The robot performs turns using timed in-place servo rotations.
 
-A smaller score usually means the wall is closer or more strongly detected.
+The left and right turn durations are calibrated separately because the two motors and the mechanical system may not behave identically.
 
-The three sensor readings are stored in a `SensorState` structure:
+These values may need to be recalibrated if:
+
+- battery voltage changes;
+- wheel friction changes;
+- servo behavior changes;
+- the robot carries additional weight;
+- the maze surface changes.
+
+---
+
+## IR Wall Detection
+
+Each IR sensor is sampled using frequencies from:
+
+```text
+37 kHz to 42 kHz
+```
+
+in 1 kHz steps.
+
+This produces six readings for each direction.
 
 ```cpp
-struct SensorState {
-  int left;
-  int mid;
-  int right;
+for (long freq = 37000; freq <= 42000; freq += 1000)
+```
 
-  bool leftWall;
-  bool frontWall;
-  bool rightWall;
+The readings are summed to produce a sensor score.
+
+Lower values indicate stronger reflected IR signals and therefore a higher likelihood that a wall is present.
+
+### Wall Thresholds
+
+```cpp
+const int SIDE_WALL_LIMIT = 6;
+const int FRONT_WALL_LIMIT = SIDE_WALL_LIMIT - 2;
+```
+
+Therefore:
+
+```text
+Side wall threshold  = 6
+Front wall threshold = 4
+```
+
+A side is considered blocked when:
+
+```cpp
+rawValue < threshold
+```
+
+For example:
+
+```cpp
+w.blocked[LEFT_SIDE] =
+    w.raw[LEFT_SIDE] < SIDE_WALL_LIMIT;
+```
+
+The front threshold is intentionally different from the side threshold so that front-wall detection can be tuned separately.
+
+---
+
+## Sensor Data Structure
+
+Sensor information is grouped into the following structure:
+
+```cpp
+struct Walls {
+    int raw[3];
+    bool blocked[3];
 };
 ```
 
-This makes the main loop easier to read because it can use clear Boolean values such as `leftWall`, `frontWall`, and `rightWall`.
+For each direction, the robot stores:
+
+- the raw IR score;
+- whether that direction is considered blocked.
+
+The direction indexes are defined by:
+
+```cpp
+enum Side {
+    LEFT_SIDE = 0,
+    FRONT_SIDE = 1,
+    RIGHT_SIDE = 2
+};
+```
+
+This avoids using unexplained numeric indexes throughout the program.
 
 ---
 
-## 7. Movement Functions
+# Movement Control
 
-### `setServos(int leftServoSpeed, int rightServoSpeed)`
-
-This is the lowest-level movement function.
-It converts logical speed values into microsecond PWM signals for the two servos.
+## Forward Movement
 
 ```cpp
-int pwm1 = STOP_VALUE - leftServoSpeed - CALIBRATION_VALUE_LEFT;
-int pwm2 = STOP_VALUE + rightServoSpeed;
+void driveAhead(int speed)
 ```
 
-Because the two servos are mounted in opposite directions, their PWM calculations are different.
-
-### `moveForward(int speed)`
-
-Moves both wheels forward at the same logical speed.
-
-### `moveBackward(int speed)`
-
-Moves both wheels backward by passing negative speeds into `setServos`.
-
-### `stop()`
-
-Stops both servos by sending the neutral pulse width.
-
-### `turnLeft90()` and `turnRight90()`
-
-These functions perform timed 90-degree turns.
-They use fixed delay values rather than feedback-based turning.
-
-### `uTurn()`
-
-Performs a timed 180-degree turn, mainly used when the robot reaches a short dead end.
+Moves both wheels forward.
 
 ---
 
-## 8. Corridor Following
-
-The robot follows a corridor by comparing the left and right sensor distance scores.
+## Reverse Movement
 
 ```cpp
-int difference = left - right;
+void driveBack(int speed)
 ```
 
-The program then adjusts the two servo speeds:
-
-* if the robot is too close to the left wall, it steers right;
-* if the robot is too close to the right wall, it steers left;
-* if the difference is small, it moves forward normally.
-
-The correction is split into two levels:
-
-* small correction;
-* large correction.
-
-This prevents the robot from overreacting to minor sensor differences.
+Commands both wheels in the reverse direction.
 
 ---
 
-## 9. Dead-End Tracking
-
-The function `updateDeadEndTracking()` starts timing when the robot enters a narrow corridor where:
+## Stop
 
 ```cpp
-s.leftWall && s.rightWall && !s.frontWall
+void brakeRobot()
 ```
 
-This means:
-
-* left wall detected;
-* right wall detected;
-* front is open.
-
-If the robot later reaches a dead end, the elapsed time in that corridor is used to decide whether the dead end is short or long.
+Stops both servos using approximately neutral servo pulse widths.
 
 ---
 
-## 10. Dead-End Handling
-
-A dead end is detected when all three directions are blocked:
+## In-Place Rotation
 
 ```cpp
-s.frontWall && s.leftWall && s.rightWall
+void spinRobot(char direction, int speed)
 ```
 
-When this happens, `handleDeadEnd()` is called.
+Rotates the robot in place.
 
-The code calculates:
+Supported directions are:
 
-```cpp
-unsigned long timeInCorridor = millis() - corridorEntryTime;
+```text
+'L' = left
+'R' = right
 ```
-
-If the robot has spent at least `LONG_DEAD_END_THRESHOLD_MS` in the corridor, the program treats this as the finish area and stops permanently:
-
-```cpp
-while (true) {}
-```
-
-If the dead end is short, the robot performs a U-turn and then moves forward slightly.
-
-Important note: the constant `BACKUP_BEFORE_UTURN_MS` is defined, but the current `handleDeadEnd()` implementation does not call `moveBackward()` before the U-turn.
 
 ---
 
-## 11. Post-U-Turn Suppression
-
-After a U-turn, the robot may pass the same junction area again.
-Without protection, it could immediately detect the same side opening and turn back into the dead end.
-
-To prevent this, the program uses:
+## 90-Degree Turn
 
 ```cpp
-suppressEdgeDetection
-postUTurnOpenAreaSeen
+void quarterTurn(char direction)
 ```
 
-While suppression is active:
+Performs an approximately 90° turn using the calibrated timing values.
 
-* side-opening detection is temporarily ignored;
-* the robot continues forward if the front is open;
-* normal side-opening detection is re-enabled only after the robot has clearly returned to a corridor with walls on both sides.
+The sequence is:
 
----
-
-## 12. T-Junction Handling
-
-When the front is blocked and both sides are open, the robot may be facing a T-junction.
-
-The program does not turn immediately.
-Instead, it creeps forward for a short time:
-
-```cpp
-moveForward(80);
-delay(T_JUNCTION_CREEP_MS);
+```text
+Start rotation
+      ↓
+Wait calibrated turn time
+      ↓
+Stop robot
+      ↓
+Wait 80 ms
+      ↓
+Reset opening counters
 ```
 
-Then it reads the sensors again.
-
-This second reading helps distinguish between:
-
-* left-turn corner;
-* right-turn corner;
-* true T-junction;
-* dead end.
-
-If it is a true T-junction, the default behaviour is to turn left unless the robot recently performed a U-turn and has a stored previous turn direction.
-
 ---
 
-## 13. Main Loop Decision Order
+## Entering a New Corridor
 
-The main loop reads sensors once per cycle, updates dead-end tracking, and then checks navigation cases in priority order.
-
-The order is important:
-
-1. dead end;
-2. post-U-turn suppression;
-3. startup lockout;
-4. left opening;
-5. right opening;
-6. normal corridor;
-7. T-junction;
-8. safety fallback.
-
-This prevents the robot from making unsafe or conflicting decisions.
-For example, dead-end handling is checked before normal movement, and post-U-turn suppression is checked before normal side-opening detection.
-
----
-
-## 14. Startup Lockout
-
-For the first `START_TURN_LOCKOUT_MS` milliseconds after startup, side openings are ignored if the front is open.
-
-This avoids false turns caused by unstable sensor readings immediately after the robot starts.
+After a turn, the robot drives forward for:
 
 ```cpp
-if (millis() - startTime < START_TURN_LOCKOUT_MS && frontOpen) {
-  followCorridor(s.left, s.right);
-  return;
+const int AFTER_TURN_FORWARD_MS = 1051;
+```
+
+This moves the robot away from the junction and into the new corridor before normal wall detection resumes.
+
+---
+
+# Corridor Centering
+
+The function:
+
+```cpp
+keepMiddleOfCorridor()
+```
+
+compares the left and right IR scores.
+
+```cpp
+int offset = leftScore - rightScore;
+```
+
+The difference is used to estimate whether the robot is closer to one side of the corridor.
+
+### Control Logic
+
+| Offset | Interpretation | Action |
+|---:|---|---|
+| `<= -3` | Too close to left wall | Strong correction right |
+| `-2` | Slightly close to left wall | Soft correction right |
+| `-1, 0, 1` | Approximately centered | Drive straight |
+| `2` | Slightly close to right wall | Soft correction left |
+| `>= 3` | Too close to right wall | Strong correction left |
+
+This is a discrete feedback controller rather than a continuous PID controller.
+
+---
+
+# Side-Opening Confirmation
+
+A single open-side reading is not immediately treated as a junction.
+
+The program uses:
+
+```cpp
+const int OPENING_CONFIRM_LIMIT = 2;
+```
+
+An opening must therefore be detected in two consecutive sensor scans before the robot commits to the corresponding turn.
+
+The counters are:
+
+```cpp
+int leftOpenSeen = 0;
+int rightOpenSeen = 0;
+```
+
+This helps reduce false turns caused by:
+
+- sensor noise;
+- temporary IR interference;
+- small gaps;
+- unstable readings near wall edges.
+
+---
+
+# Junction Alignment
+
+Before turning into an opening, the robot moves forward slightly so that its rotation point is better aligned with the center of the junction.
+
+This is controlled by:
+
+```cpp
+void alignAndTurn(char direction, bool frontIsBlocked)
+```
+
+Two different alignment times are used.
+
+### Side Opening With Open Front
+
+```cpp
+const int SIDE_OPEN_FORWARD_ALIGN_MS = 900;
+```
+
+### Front Blocked
+
+```cpp
+const int FRONT_BLOCKED_ALIGN_MS = 241;
+```
+
+The shorter value is used when the robot is already close to a front wall.
+
+---
+
+# T-Junction Detection
+
+When:
+
+```text
+Front = blocked
+Left  = open
+Right = open
+```
+
+the robot does not immediately assume that it has reached a perfect T-junction.
+
+Instead, it calls:
+
+```cpp
+inspectTJunction();
+```
+
+The robot creeps forward for:
+
+```cpp
+const int T_RECHECK_FORWARD_MS = 150;
+```
+
+and scans the maze again.
+
+This second measurement helps distinguish between:
+
+- a left corner;
+- a right corner;
+- a true T-junction;
+- a dead end.
+
+---
+
+## Confirmed Left Corner
+
+Condition:
+
+```text
+Left  = open
+Front = blocked
+Right = blocked
+```
+
+Action:
+
+```text
+Turn left
+```
+
+---
+
+## Confirmed Right Corner
+
+Condition:
+
+```text
+Left  = blocked
+Front = blocked
+Right = open
+```
+
+Action:
+
+```text
+Turn right
+```
+
+---
+
+## Confirmed T-Junction
+
+Condition:
+
+```text
+Left  = open
+Front = blocked
+Right = open
+```
+
+If there is no recent U-turn context, the default behavior is:
+
+```text
+Turn left
+```
+
+The robot also stores the previous turn so that the navigation decision can be adjusted after returning from a dead end.
+
+---
+
+# Navigation Memory
+
+Several variables allow the robot to remember limited information about previous movement.
+
+```cpp
+char previousTurn = ' ';
+bool uTurnJustMade = false;
+```
+
+`previousTurn` stores:
+
+```text
+'L' — previous important turn was left
+'R' — previous important turn was right
+```
+
+When the robot performs a U-turn and later returns to a T-junction, this information is used to determine which direction should be taken.
+
+This provides a small amount of route context without maintaining a complete representation of the maze.
+
+---
+
+# Dead-End Detection
+
+A possible dead-end corridor is identified when:
+
+```text
+Left  = blocked
+Right = blocked
+Front = open
+```
+
+The robot begins timing how long it remains in this narrow corridor.
+
+```cpp
+possibleDeadEndStartMs = millis();
+```
+
+If the robot eventually reaches:
+
+```text
+Left  = blocked
+Front = blocked
+Right = blocked
+```
+
+the elapsed corridor time is examined.
+
+---
+
+## Short Dead End
+
+If:
+
+```cpp
+elapsed < LONG_DEAD_END_MS
+```
+
+the area is interpreted as a normal dead end.
+
+The robot:
+
+```text
+Stops
+  ↓
+Performs a U-turn
+  ↓
+Drives forward
+  ↓
+Returns toward the previous junction
+```
+
+---
+
+## Long Dead End / Finish Detection
+
+The threshold is:
+
+```cpp
+const unsigned long LONG_DEAD_END_MS = 1400;
+```
+
+If the robot has travelled through the narrow corridor for at least this amount of time before reaching the blocked end, it treats that location as the finish area.
+
+```cpp
+if (timingNarrowCorridor &&
+    elapsed >= LONG_DEAD_END_MS) {
+
+    brakeRobot();
+
+    while (true) {
+    }
 }
 ```
 
----
-
-## 15. Navigation Behaviour Summary
-
-| Situation                              | Robot Behaviour                             |
-| -------------------------------------- | ------------------------------------------- |
-| Front open, no side opening confirmed  | Follow corridor                             |
-| Right wall detected and left side open | Confirm left opening, then turn left        |
-| Left wall detected and right side open | Confirm right opening, then turn right      |
-| Front blocked, both sides open         | Treat as possible T-junction and re-check   |
-| Left, front, and right all blocked     | Handle as dead end                          |
-| Short dead end                         | Perform U-turn                              |
-| Long dead end                          | Stop permanently as finish area             |
-| Immediately after U-turn               | Suppress side-opening detection temporarily |
+The infinite loop deliberately prevents any further navigation after the finish is detected.
 
 ---
 
-## 16. Calibration Guide
+# U-Turn Recovery
 
-If the robot does not move correctly, tune these values first.
-
-### Robot drifts while moving forward
-
-Adjust:
+The U-turn is performed by:
 
 ```cpp
-CALIBRATION_VALUE_LEFT
+rotateBack();
 ```
 
-If the robot drifts left, try increasing the value.
-If the robot drifts right, try decreasing the value.
-
-### Robot turns too far or not far enough
-
-Adjust:
+using:
 
 ```cpp
-LEFT_TURN_TIME
-RIGHT_TURN_TIME
-U_TURN_TIME
+const int UTURN_SPIN_SPEED = 250;
+const int UTURN_SPIN_MS = 980;
 ```
 
-Increase the time if the robot under-turns.
-Decrease the time if the robot over-turns.
+After the U-turn, the robot temporarily ignores side openings.
 
-### Robot detects walls incorrectly
-
-Adjust:
+This is controlled by:
 
 ```cpp
-WALL_THRESHOLD
-FRONT_WALL_THRESHOLD
+bool ignoreSideEdges = false;
+bool sawOpenAreaAfterUTurn = false;
 ```
 
-If the robot detects walls that are not there, the threshold may be too high.
-If the robot misses real walls, the threshold may be too low.
+The reason is that immediately after leaving a dead end, the robot may pass through the same junction geometry that previously caused a turn.
 
-### Robot turns too early or too late at openings
+Without suppression, the robot could prematurely detect a side edge and make an incorrect turn before completely leaving the junction.
 
-Adjust:
+Side-opening detection is re-enabled after the robot has:
 
-```cpp
-SIDE_OPEN_ALIGN_MS
-CORNER_ALIGN_MS
-```
-
-Increase the alignment time if the robot turns too early.
-Decrease the alignment time if the robot turns too late or misses the junction.
+1. detected an open junction area; and
+2. returned to a corridor with walls on both sides.
 
 ---
 
-## 17. Serial Debug Output
+# Startup Protection
 
-The program prints useful debugging information to the Serial Monitor, including:
+Immediately after startup, the robot ignores side-turn decisions for:
 
-* raw left, middle, and right sensor scores;
-* servo PWM values;
-* wall-following correction decisions;
-* detected left or right openings;
-* dead-end timing;
-* T-junction confirmation results;
-* U-turn and post-U-turn suppression messages.
+```cpp
+const unsigned long START_IGNORE_TURNS_MS = 700;
+```
 
-Use the Serial Monitor at:
+During this period, if the front is open, the robot only moves forward and performs corridor balancing.
+
+This reduces the likelihood that the initial maze position is incorrectly interpreted as a side junction.
+
+---
+
+# Main Navigation Algorithm
+
+The main navigation logic is implemented in:
+
+```cpp
+void loop()
+```
+
+The decision priority is important.
+
+```text
+Scan IR sensors
+       ↓
+Update dead-end timer
+       ↓
+Are all three directions blocked?
+       │
+       ├── YES → resolve dead end
+       │
+       └── NO
+            ↓
+Is post-U-turn edge suppression active?
+       │
+       ├── YES → continue forward when possible
+       │
+       └── NO
+            ↓
+Still in startup protection?
+       │
+       ├── YES → move forward
+       │
+       └── NO
+            ↓
+Confirmed left opening?
+       │
+       ├── YES → align and turn left
+       │
+       └── NO
+            ↓
+Confirmed right opening?
+       │
+       ├── YES → align and turn right
+       │
+       └── NO
+            ↓
+Is front open?
+       │
+       ├── YES → corridor centering
+       │
+       └── NO
+            ↓
+Front blocked and both sides open?
+       │
+       ├── YES → inspect T-junction
+       │
+       └── NO
+            ↓
+Stop for safety
+```
+
+---
+
+# Navigation Decision Table
+
+| Left | Front | Right | Main Behaviour |
+|---|---|---|---|
+| Blocked | Open | Blocked | Continue through corridor |
+| Open | Open | Blocked | Confirm opening, then turn left |
+| Blocked | Open | Open | Confirm opening, then turn right |
+| Open | Blocked | Blocked | Turn left |
+| Blocked | Blocked | Open | Turn right |
+| Open | Blocked | Open | Inspect T-junction |
+| Blocked | Blocked | Blocked | Dead-end handling |
+
+Actual behavior may also depend on:
+
+- startup lockout;
+- opening confirmation counters;
+- previous turn;
+- U-turn state;
+- dead-end timer;
+- post-U-turn edge suppression.
+
+---
+
+# Serial Debugging
+
+The program outputs detailed diagnostic information at:
+
+```cpp
+Serial.begin(9600);
+```
+
+Examples include:
+
+```text
+L: 2 | M: 6 | R: 3
+```
+
+for IR measurements,
+
+```text
+Centered -> move forward
+```
+
+for corridor control,
+
+```text
+Align then turn LEFT
+```
+
+for junction handling,
+
+and:
+
+```text
+Dead end! Time in corridor: 920 ms
+SHORT dead end -> reverse then U-turn
+```
+
+for dead-end processing.
+
+Servo pulse values are also printed:
+
+```text
+servo_1: 1450 | servo_2: 1560
+```
+
+These messages are useful when calibrating the robot or diagnosing incorrect maze decisions.
+
+---
+
+# Important Functions
+
+| Function | Purpose |
+|---|---|
+| `writeDrive()` | Sends movement commands to both servos |
+| `driveAhead()` | Drives forward |
+| `driveBack()` | Drives backward |
+| `brakeRobot()` | Stops both motors |
+| `spinRobot()` | Rotates robot in place |
+| `quarterTurn()` | Performs calibrated 90° turn |
+| `rotateBack()` | Performs U-turn |
+| `enterNewCorridor()` | Moves robot away from junction after turning |
+| `readIRPulse()` | Reads one IR receiver at one frequency |
+| `measureIR()` | Performs multi-frequency IR measurement |
+| `scanMaze()` | Reads all three directions |
+| `keepMiddleOfCorridor()` | Corrects corridor position |
+| `refreshDeadEndTimer()` | Tracks possible dead-end corridor duration |
+| `alignAndTurn()` | Aligns robot before turning |
+| `resolveDeadEnd()` | Handles short and long dead ends |
+| `continueAfterUTurnIfNeeded()` | Suppresses false side-edge detection |
+| `inspectTJunction()` | Rechecks ambiguous T-junction geometry |
+
+---
+
+# Installation and Upload
+
+## Requirements
+
+- Arduino-compatible development environment;
+- Arduino `Servo` library;
+- two continuous-rotation servos;
+- three IR transmitter/receiver pairs;
+- suitable power supply for the motors and controller.
+
+The Servo library is included with standard Arduino installations:
+
+```cpp
+#include <Servo.h>
+```
+
+---
+
+## Upload Procedure
+
+1. Connect the IR emitters, receivers, LEDs, and servos according to the hardware table.
+2. Open the program in the Arduino IDE.
+3. Select the appropriate board.
+4. Select the appropriate serial port.
+5. Compile the sketch.
+6. Upload it to the robot.
+7. Open the Serial Monitor.
+8. Set the baud rate to:
 
 ```text
 9600 baud
 ```
 
----
-
-## 18. Limitations
-
-This program relies on fixed timing values for turns and U-turns.
-Therefore, its performance may change depending on:
-
-* battery voltage;
-* servo calibration;
-* wheel friction;
-* floor surface;
-* robot weight distribution;
-* IR reflection from wall material;
-* ambient lighting;
-* maze geometry.
-
-The program does not use encoder feedback, gyroscope feedback, or continuous turn-angle correction.
-For more reliable turning, additional sensors or closed-loop control would be needed.
+9. Place the robot at the maze starting position.
+10. Reset or power on the robot.
 
 ---
 
-## 19. How to Use
+# Calibration
 
-1. Connect the IR sensors, LEDs, and servos according to the pin configuration.
-2. Upload the Arduino sketch to the board.
-3. Open the Serial Monitor at 9600 baud.
-4. Place the robot at the maze start position.
-5. Turn on the robot and observe the sensor values.
-6. Adjust thresholds and movement timing values as needed.
-7. Test again until the robot reliably follows corridors, turns at openings, and handles dead ends.
+The current implementation depends heavily on physical timing and sensor thresholds.
+
+The following constants should be tested on the actual robot.
+
+## IR Thresholds
+
+```cpp
+SIDE_WALL_LIMIT
+FRONT_WALL_LIMIT
+```
+
+Adjust these if the robot incorrectly classifies open space as a wall or fails to detect walls.
 
 ---
 
-## 20. Key Design Idea
+## 90° Turns
 
-The central idea of the program is:
+```cpp
+TURN_LEFT_90_MS
+TURN_RIGHT_90_MS
+```
 
-> Read the three IR sensors, convert them into wall states, then choose one navigation action according to a fixed priority order.
+Increase the corresponding value if the robot under-rotates.
 
-The robot does not move the maze data or store a full map.
-Instead, it makes local decisions based on the current left, front, and right sensor readings, plus a small amount of state such as previous turn direction, dead-end timing, and U-turn suppression.
+Decrease it if the robot over-rotates.
+
+---
+
+## Junction Alignment
+
+```cpp
+SIDE_OPEN_FORWARD_ALIGN_MS
+FRONT_BLOCKED_ALIGN_MS
+```
+
+These determine where the robot positions itself before turning.
+
+Incorrect values may cause:
+
+- clipping maze walls;
+- turning too early;
+- turning too late;
+- entering the next corridor at an angle.
+
+---
+
+## Post-Turn Forward Movement
+
+```cpp
+AFTER_TURN_FORWARD_MS
+```
+
+This controls how far the robot moves into the new corridor before normal navigation resumes.
+
+---
+
+## U-Turn
+
+```cpp
+UTURN_SPIN_SPEED
+UTURN_SPIN_MS
+```
+
+These determine the approximate 180° rotation.
+
+---
+
+## Dead-End Classification
+
+```cpp
+LONG_DEAD_END_MS
+```
+
+This distinguishes an ordinary short dead end from the designated long finish corridor.
+
+Changing driving speed may require this threshold to be recalibrated.
+
+---
+
+# Design Considerations
+
+## Advantages
+
+The current design includes several mechanisms intended to improve robustness:
+
+- multi-frequency IR sampling;
+- separate front and side thresholds;
+- two-sample side-opening confirmation;
+- startup junction suppression;
+- pre-turn alignment;
+- T-junction rechecking;
+- corridor centering;
+- dead-end timing;
+- post-U-turn edge suppression;
+- limited previous-turn memory;
+- safety stop when no valid state is identified.
+
+---
+
+## Limitations
+
+The program is primarily a **reactive navigation controller** rather than a full maze-solving algorithm.
+
+It does not construct a complete map of the maze and does not maintain a stack or graph containing every previous junction.
+
+Several behaviors also depend on fixed timing constants such as:
+
+```cpp
+delay(TURN_LEFT_90_MS);
+delay(SIDE_OPEN_FORWARD_ALIGN_MS);
+delay(AFTER_TURN_FORWARD_MS);
+```
+
+Therefore, navigation accuracy depends on relatively stable:
+
+- motor speed;
+- battery voltage;
+- maze dimensions;
+- wheel traction;
+- IR reflection characteristics.
+
+The corridor controller is also based on discrete IR score differences rather than a continuously calibrated distance estimate.
+
+---
+
+# Possible Future Improvements
+
+Potential extensions include:
+
+- replace fixed delays with encoder-based movement;
+- use proportional or PID corridor control;
+- average or filter multiple IR measurements;
+- replace blocking `delay()` calls with a non-blocking state machine;
+- dynamically calibrate IR thresholds;
+- maintain a stack of junction decisions;
+- implement Trémaux, DFS, or another formal maze-solving algorithm;
+- store a maze graph for route optimization;
+- use wheel encoders or an IMU for more accurate turns;
+- separate sensor, motion, and navigation logic into independent modules.
+
+---
+
+# Summary
+
+This program controls an autonomous IR-based maze robot using three directional sensors and two continuous-rotation servos.
+
+Its navigation pipeline combines:
+
+```text
+IR sensing
+   +
+wall classification
+   +
+corridor correction
+   +
+junction confirmation
+   +
+timed turning
+   +
+dead-end detection
+   +
+U-turn recovery
+   +
+limited navigation memory
+```
+
+The design is intended to provide reliable navigation in a known physical maze environment while remaining simple enough to execute on an Arduino-class microcontroller.
+

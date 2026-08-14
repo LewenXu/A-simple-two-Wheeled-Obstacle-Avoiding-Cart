@@ -1,4 +1,4 @@
-# ELEC1601 Maze Robot README
+# USYD ELEC1601 Maze Robot README
 
 ## 1. Project Overview
 

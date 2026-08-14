@@ -1,5 +1,5 @@
 
-# IR Maze Navigation Robot
+# USYD ELEC1601 Project 
 
 ## Overview
 

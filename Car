@@ -28,8 +28,8 @@ const byte DEBUG_LED_PIN[3] = {
   A0    // right LED
 };
 
-const byte LEFT_SERVO_PIN = 12;
-const byte RIGHT_SERVO_PIN = 13;
+const byte LEFT_SERVO_PIN = 34;
+const byte RIGHT_SERVO_PIN = 23;
 
 Servo leftServo;
 Servo rightServo;
@@ -42,41 +42,41 @@ Servo rightServo;
 const int SERVO_STOP_US = 1500;
 const int LEFT_SERVO_TRIM = -10;
 
-const int DRIVE_SPEED = 60;
+const int DRIVE_SPEED = 88;
 
-const int SOFT_CORRECTION = -6;
-const int STRONG_CORRECTION = -30;
+const int SOFT_CORRECTION = -8;
+const int STRONG_CORRECTION = -15;
 
-const int TURN_LEFT_90_MS = 497;
-const int TURN_RIGHT_90_MS = 517;
+const int TURN_LEFT_90_MS = 388;
+const int TURN_RIGHT_90_MS = 520;
 
-const int SIDE_WALL_LIMIT = 6;
-const int FRONT_WALL_LIMIT = SIDE_WALL_LIMIT - 2;
+const int SIDE_WALL_LIMIT = 1;
+const int FRONT_WALL_LIMIT = SIDE_WALL_LIMIT - 8;
 
 
 // =====================================================
 // Navigation timing values
 // =====================================================
 
-const unsigned long START_IGNORE_TURNS_MS = 700;
+const unsigned long START_IGNORE_TURNS_MS = 610;
 
-const int OPENING_CONFIRM_LIMIT = 2;
+const int OPENING_CONFIRM_LIMIT = 5;
 
-const int SIDE_OPEN_FORWARD_ALIGN_MS = 900;
-const int FRONT_BLOCKED_ALIGN_MS = 241;
+const int SIDE_OPEN_FORWARD_ALIGN_MS = 788;
+const int FRONT_BLOCKED_ALIGN_MS = 325;
 
-const int JUNCTION_ALIGN_SPEED = 60;
+const int JUNCTION_ALIGN_SPEED = 76;
 
-const int AFTER_TURN_FORWARD_MS = 1051;
+const int AFTER_TURN_FORWARD_MS = 918;
 
-const int T_RECHECK_FORWARD_MS = 150;
+const int T_RECHECK_FORWARD_MS = 910;
 
-const int UNUSED_BACKUP_BEFORE_UTURN_MS = 260;
+const int UNUSED_BACKUP_BEFORE_UTURN_MS = 690;
 
-const int UTURN_SPIN_SPEED = 250;
-const int UTURN_SPIN_MS = 980;
+const int UTURN_SPIN_SPEED = 519;
+const int UTURN_SPIN_MS = 569;
 
-const unsigned long LONG_DEAD_END_MS = 1400;
+const unsigned long LONG_DEAD_END_MS = 1367;
 
 
 // =====================================================
